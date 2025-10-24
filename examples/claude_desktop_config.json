@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "windows-control": {
+      "command": "python",
+      "args": [
+        "-m",
+        "windows_mcp.server"
+      ],
+      "env": {}
+    }
+  }
+}
