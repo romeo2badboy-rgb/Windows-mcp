@@ -1,6 +1,7 @@
 """Service for traversing and analyzing the UI tree."""
 
 import random
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Optional
 from PIL import Image, ImageDraw, ImageFont
@@ -35,6 +36,9 @@ from windows_mcp.tree.views import (
 if TYPE_CHECKING:
     from windows_mcp.desktop.service import Desktop
 
+# Configure logging
+logger = logging.getLogger('windows-mcp.tree')
+
 
 class Tree:
     """Handles UI tree traversal and element detection."""
@@ -47,16 +51,50 @@ class Tree:
         """
         self.desktop = desktop
         self.screen_size = self.desktop.get_screen_size()
+        self._element_cache = {}  # Cache for faster lookups
+        self._last_scan_time = 0
 
-    def get_state(self) -> TreeState:
-        """Get the current UI tree state.
+    def get_state(self, force_refresh: bool = False) -> TreeState:
+        """Get the current UI tree state with caching.
+
+        Args:
+            force_refresh: Force a full rescan even if cache is valid
 
         Returns:
             TreeState object containing interactive, informative, and scrollable elements
         """
         if not UIAUTOMATION_AVAILABLE:
+            logger.warning("UIAutomation not available, returning empty state")
             return TreeState()
 
+        try:
+            import time
+            current_time = time.time()
+
+            # Use cache if less than 2 seconds old and not forced
+            if not force_refresh and (current_time - self._last_scan_time) < 2.0:
+                logger.debug("Using cached tree state")
+                return self._cached_state if hasattr(self, '_cached_state') else self._scan_tree()
+
+            logger.info("Scanning UI tree...")
+            state = self._scan_tree()
+            self._cached_state = state
+            self._last_scan_time = current_time
+
+            logger.info(
+                f"Tree scan complete: {len(state.interactive_nodes)} interactive, "
+                f"{len(state.informative_nodes)} informative, "
+                f"{len(state.scrollable_nodes)} scrollable elements"
+            )
+
+            return state
+
+        except Exception as e:
+            logger.error(f"Error getting tree state: {e}", exc_info=True)
+            return TreeState()
+
+    def _scan_tree(self) -> TreeState:
+        """Perform a full tree scan."""
         root = GetRootControl()
         interactive_nodes, informative_nodes, scrollable_nodes = self._get_appwise_nodes(root)
 
