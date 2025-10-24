@@ -1,6 +1,40 @@
 # Windows MCP Server
 
-A comprehensive Model Context Protocol (MCP) server that enables AI assistants to control and automate Windows PCs. This server provides full PC automation capabilities including screen capture, mouse/keyboard control, window management, application control, and system operations.
+A comprehensive Model Context Protocol (MCP) server that enables AI assistants to control and automate Windows PCs with **intelligent UI element detection**. This server provides full PC automation capabilities including smart screen capture, mouse/keyboard control, window management, application control, and system operations.
+
+## 🌟 Smart Features (NEW!)
+
+### Intelligent UI Element Detection
+- **get_desktop_state** - Captures comprehensive desktop state with AI-friendly element labeling
+  - Automatically detects all interactive elements (buttons, links, text fields, checkboxes, etc.)
+  - Assigns numbered labels to each element for easy reference
+  - Categorizes elements into interactive, informative, and scrollable
+  - Optional annotated screenshots with bounding boxes
+  - Understands Windows UI tree structure semantically
+
+- **click_element** - Click UI elements by label (not coordinates!)
+  - More reliable than coordinate-based clicking
+  - Works with element labels from get_desktop_state
+  - Automatically uses element center point
+
+- **type_into_element** - Type into UI elements by label
+  - Automatically clicks to focus element
+  - Option to clear existing text
+  - Option to press Enter after typing
+  - Perfect for form filling and automation
+
+### Why This Is Better
+Traditional automation uses pixel coordinates which break when:
+- Windows resize or move
+- Screen resolution changes
+- UI layouts change
+
+Smart element detection uses the **Windows UI Automation tree**, which:
+- ✅ Identifies elements semantically (not by position)
+- ✅ Works across different layouts and resolutions
+- ✅ Provides element metadata (name, type, value, etc.)
+- ✅ Handles browser content intelligently
+- ✅ More reliable and maintainable
 
 ## Features
 
@@ -101,6 +135,24 @@ After adding the configuration, restart Claude Desktop to load the MCP server.
 
 ## Usage Examples
 
+### Smart UI Automation (Recommended)
+
+```
+User: "Fill out the login form with my email and password"
+
+AI: [First uses get_desktop_state to see all UI elements]
+AI: [Sees element 5 is "Email" text field, element 6 is "Password" text field, element 7 is "Login" button]
+AI: [Uses type_into_element(label=5, text="user@example.com")]
+AI: [Uses type_into_element(label=6, text="password123")]
+AI: [Uses click_element(label=7) to click Login button]
+
+User: "Click the Save button"
+
+AI: [Uses get_desktop_state with use_vision=true to see annotated screenshot]
+AI: [Identifies Save button as element 12]
+AI: [Uses click_element(label=12)]
+```
+
 ### Basic Automation Example
 
 ```
@@ -144,6 +196,11 @@ AI: [Uses restart tool with delay parameter set to 60]
 ```
 
 ## Available Tools
+
+### 🎯 Smart UI Automation (Recommended!)
+- `get_desktop_state` - Capture comprehensive UI state with element detection
+- `click_element` - Click elements by label number
+- `type_into_element` - Type into elements by label number
 
 ### Screen Capture
 - `screenshot` - Capture screen with optional monitor selection
@@ -221,7 +278,20 @@ This MCP server provides powerful system control capabilities. Consider the foll
 Windows-mcp/
 ├── windows_mcp/
 │   ├── __init__.py
-│   └── server.py          # Main MCP server implementation
+│   ├── server.py          # Main MCP server implementation
+│   ├── desktop/           # Desktop management module
+│   │   ├── __init__.py
+│   │   ├── config.py      # Desktop configuration
+│   │   ├── service.py     # Desktop operations
+│   │   └── views.py       # Desktop data models
+│   └── tree/              # UI tree analysis module
+│       ├── __init__.py
+│       ├── config.py      # Element categorization rules
+│       ├── service.py     # UI tree traversal & detection
+│       └── views.py       # Tree element data models
+├── examples/
+│   ├── claude_desktop_config.json
+│   └── automation_examples.md
 ├── pyproject.toml         # Python package configuration
 ├── package.json           # NPM package configuration
 └── README.md              # This file
@@ -252,6 +322,8 @@ mcp-inspector windows-mcp
 - **pywin32** - Windows API access
 - **psutil** - Process and system utilities
 - **mss** - Fast screenshot capture
+- **uiautomation** - Windows UI Automation tree access (NEW! For smart element detection)
+- **tabulate** - Formatted table output (NEW!)
 - **pytesseract** - OCR (optional)
 - **opencv-python** - Image processing
 
@@ -285,6 +357,22 @@ For issues and questions:
 - MCP Documentation: https://modelcontextprotocol.io
 
 ## Changelog
+
+### v0.2.0 (Smart UI Detection Release)
+- **NEW: Intelligent UI element detection with get_desktop_state**
+  - Automatic element labeling and categorization
+  - Interactive, informative, and scrollable element detection
+  - Annotated screenshots with bounding boxes
+  - Windows UI Automation tree traversal
+- **NEW: Label-based element interaction**
+  - click_element - Click by label number
+  - type_into_element - Type into by label number
+- **NEW: Modular architecture**
+  - desktop/ module for desktop management
+  - tree/ module for UI tree analysis
+- Enhanced reliability with semantic element detection
+- Parallel element processing for better performance
+- Browser-aware element detection
 
 ### v0.1.0 (Initial Release)
 - Complete screen capture system

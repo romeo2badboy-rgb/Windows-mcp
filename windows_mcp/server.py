@@ -33,6 +33,14 @@ except ImportError:
     WINDOWS_AVAILABLE = False
     print("Warning: pywin32 not available. Some features will be limited.")
 
+try:
+    from windows_mcp.desktop.service import Desktop
+    from windows_mcp.tree.service import Tree
+    DESKTOP_SERVICE_AVAILABLE = True
+except ImportError:
+    DESKTOP_SERVICE_AVAILABLE = False
+    print("Warning: Desktop service not available. State tool will be limited.")
+
 from mcp.server import Server
 from mcp.types import (
     Tool,
@@ -48,6 +56,10 @@ pyautogui.PAUSE = 0.1
 # Initialize MCP server
 app = Server("windows-mcp-server")
 
+# Initialize desktop service and cached state
+desktop_service = Desktop() if DESKTOP_SERVICE_AVAILABLE else None
+cached_tree_state = None
+
 
 # ============================================================================
 # SCREEN CAPTURE TOOLS
@@ -57,6 +69,89 @@ app = Server("windows-mcp-server")
 async def list_tools() -> list[Tool]:
     """List all available Windows automation tools."""
     return [
+        # Desktop State Tool (MOST IMPORTANT - USE THIS FIRST!)
+        Tool(
+            name="get_desktop_state",
+            description="[CRITICAL] Capture comprehensive desktop state including all interactive UI elements (buttons, links, text fields), informative content (text, labels), and scrollable areas. Each interactive element gets a numbered label for easy reference with click_element/type_element tools. Set use_vision=true to get an annotated screenshot showing element labels. USE THIS TOOL FIRST before any mouse/keyboard actions to understand what's on screen!",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "use_vision": {
+                        "type": "boolean",
+                        "description": "Include annotated screenshot with labeled bounding boxes around interactive elements",
+                        "default": False
+                    },
+                    "include_informative": {
+                        "type": "boolean",
+                        "description": "Include informative text elements (labels, status text, etc.)",
+                        "default": True
+                    },
+                    "include_scrollable": {
+                        "type": "boolean",
+                        "description": "Include scrollable elements with scroll state",
+                        "default": True
+                    }
+                }
+            }
+        ),
+
+        # Enhanced Click Tool
+        Tool(
+            name="click_element",
+            description="Click on a UI element using its label from get_desktop_state. More reliable than mouse_click for UI automation. Use the label number from the desktop state.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "integer",
+                        "description": "Element label number from get_desktop_state output"
+                    },
+                    "button": {
+                        "type": "string",
+                        "description": "Mouse button to click",
+                        "enum": ["left", "right", "middle"],
+                        "default": "left"
+                    },
+                    "clicks": {
+                        "type": "integer",
+                        "description": "Number of clicks (1=single, 2=double)",
+                        "default": 1
+                    }
+                },
+                "required": ["label"]
+            }
+        ),
+
+        # Enhanced Type Tool
+        Tool(
+            name="type_into_element",
+            description="Type text into a UI element using its label from get_desktop_state. Automatically clicks the element first. More reliable than keyboard_type for filling forms.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "integer",
+                        "description": "Element label number from get_desktop_state output"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to type into the element"
+                    },
+                    "clear_first": {
+                        "type": "boolean",
+                        "description": "Clear existing text before typing (Ctrl+A, Delete)",
+                        "default": False
+                    },
+                    "press_enter": {
+                        "type": "boolean",
+                        "description": "Press Enter after typing",
+                        "default": False
+                    }
+                },
+                "required": ["label", "text"]
+            }
+        ),
+
         # Screen Capture Tools
         Tool(
             name="screenshot",
@@ -425,8 +520,16 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageContent]:
     """Handle tool execution."""
 
+    # Desktop State Tool
+    if name == "get_desktop_state":
+        return await tool_get_desktop_state(arguments)
+    elif name == "click_element":
+        return await tool_click_element(arguments)
+    elif name == "type_into_element":
+        return await tool_type_into_element(arguments)
+
     # Screen Capture Tools
-    if name == "screenshot":
+    elif name == "screenshot":
         return await tool_screenshot(arguments)
     elif name == "get_screen_size":
         return await tool_get_screen_size(arguments)
@@ -483,6 +586,200 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
 
     else:
         raise ValueError(f"Unknown tool: {name}")
+
+
+# ============================================================================
+# DESKTOP STATE TOOL IMPLEMENTATIONS
+# ============================================================================
+
+async def tool_get_desktop_state(args: dict) -> list[TextContent | ImageContent]:
+    """Get comprehensive desktop state with UI element detection."""
+    global cached_tree_state
+
+    if not DESKTOP_SERVICE_AVAILABLE or desktop_service is None:
+        return [TextContent(
+            type="text",
+            text="Error: Desktop service not available. Install uiautomation library."
+        )]
+
+    try:
+        use_vision = args.get("use_vision", False)
+        include_informative = args.get("include_informative", True)
+        include_scrollable = args.get("include_scrollable", True)
+
+        # Get the tree service
+        tree = Tree(desktop_service)
+
+        # Get the UI tree state
+        tree_state = tree.get_state()
+        cached_tree_state = tree_state  # Cache for click_element/type_into_element
+
+        # Get system information
+        windows_version = desktop_service.get_windows_version()
+        default_language = desktop_service.get_default_language()
+
+        # Build the response
+        result = []
+
+        # Add system info
+        system_info = f"""=== DESKTOP STATE ===
+
+Windows Version: {windows_version}
+Default Language: {default_language}
+Encoding: {desktop_service.encoding}
+
+"""
+
+        # Add interactive elements (most important!)
+        interactive_text = tree_state.interactive_elements_to_string()
+        system_info += f"=== INTERACTIVE ELEMENTS ===\n"
+        system_info += "(Use these labels with click_element and type_into_element tools)\n\n"
+        system_info += interactive_text + "\n\n"
+
+        # Add informative elements if requested
+        if include_informative:
+            informative_text = tree_state.informative_elements_to_string()
+            system_info += f"=== INFORMATIVE ELEMENTS ===\n"
+            system_info += informative_text + "\n\n"
+
+        # Add scrollable elements if requested
+        if include_scrollable:
+            scrollable_text = tree_state.scrollable_elements_to_string()
+            system_info += f"=== SCROLLABLE ELEMENTS ===\n"
+            system_info += scrollable_text + "\n\n"
+
+        # Add statistics
+        system_info += f"=== SUMMARY ===\n"
+        system_info += f"Interactive Elements: {len(tree_state.interactive_nodes)}\n"
+        system_info += f"Informative Elements: {len(tree_state.informative_nodes)}\n"
+        system_info += f"Scrollable Elements: {len(tree_state.scrollable_nodes)}\n"
+
+        result.append(TextContent(type="text", text=system_info))
+
+        # Add annotated screenshot if requested
+        if use_vision and tree_state.interactive_nodes:
+            try:
+                screenshot_bytes = tree.create_annotated_screenshot(
+                    tree_state.interactive_nodes,
+                    scale=0.7
+                )
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
+                result.append(ImageContent(
+                    type="image",
+                    data=screenshot_b64,
+                    mimeType="image/png"
+                ))
+                result.append(TextContent(
+                    type="text",
+                    text="Annotated screenshot showing labeled interactive elements."
+                ))
+            except Exception as e:
+                result.append(TextContent(
+                    type="text",
+                    text=f"Warning: Could not generate annotated screenshot: {str(e)}"
+                ))
+
+        return result
+
+    except Exception as e:
+        return [TextContent(
+            type="text",
+            text=f"Error getting desktop state: {str(e)}"
+        )]
+
+
+async def tool_click_element(args: dict) -> list[TextContent]:
+    """Click on a UI element by its label."""
+    global cached_tree_state
+
+    if cached_tree_state is None:
+        return [TextContent(
+            type="text",
+            text="Error: No cached desktop state. Please run get_desktop_state first."
+        )]
+
+    try:
+        label = args["label"]
+        button = args.get("button", "left")
+        clicks = args.get("clicks", 1)
+
+        # Find the element by label
+        if label < 0 or label >= len(cached_tree_state.interactive_nodes):
+            return [TextContent(
+                type="text",
+                text=f"Error: Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}"
+            )]
+
+        element = cached_tree_state.interactive_nodes[label]
+
+        # Click at the element's center
+        x, y = element.center.x, element.center.y
+        pyautogui.click(x=x, y=y, button=button, clicks=clicks, duration=0.2)
+
+        click_type = "Double-clicked" if clicks == 2 else "Clicked"
+        return [TextContent(
+            type="text",
+            text=f"{click_type} {button} button on element {label}: '{element.name}' "
+                 f"({element.control_type}) at ({x},{y}) in app '{element.app_name}'"
+        )]
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error clicking element: {str(e)}")]
+
+
+async def tool_type_into_element(args: dict) -> list[TextContent]:
+    """Type text into a UI element."""
+    global cached_tree_state
+
+    if cached_tree_state is None:
+        return [TextContent(
+            type="text",
+            text="Error: No cached desktop state. Please run get_desktop_state first."
+        )]
+
+    try:
+        label = args["label"]
+        text = args["text"]
+        clear_first = args.get("clear_first", False)
+        press_enter = args.get("press_enter", False)
+
+        # Find the element by label
+        if label < 0 or label >= len(cached_tree_state.interactive_nodes):
+            return [TextContent(
+                type="text",
+                text=f"Error: Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}"
+            )]
+
+        element = cached_tree_state.interactive_nodes[label]
+
+        # Click the element first to focus it
+        x, y = element.center.x, element.center.y
+        pyautogui.click(x=x, y=y, duration=0.2)
+        time.sleep(0.1)
+
+        # Clear existing text if requested
+        if clear_first:
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.05)
+            pyautogui.press('delete')
+            time.sleep(0.05)
+
+        # Type the text
+        pyautogui.write(text, interval=0.01)
+
+        # Press enter if requested
+        if press_enter:
+            time.sleep(0.1)
+            pyautogui.press('enter')
+
+        action = "Typed (cleared first)" if clear_first else "Typed"
+        enter_msg = " and pressed Enter" if press_enter else ""
+        return [TextContent(
+            type="text",
+            text=f"{action} '{text}' into element {label}: '{element.name}' "
+                 f"({element.control_type}) in app '{element.app_name}'{enter_msg}"
+        )]
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error typing into element: {str(e)}")]
 
 
 # ============================================================================
