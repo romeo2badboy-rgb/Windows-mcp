@@ -2,6 +2,7 @@
 
 import random
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Optional
 from PIL import Image, ImageDraw, ImageFont
@@ -315,16 +316,17 @@ class Tree:
             return False
 
     def create_annotated_screenshot(
-        self, nodes: list[TreeElementNode], scale: float = 0.7
-    ) -> bytes:
-        """Create an annotated screenshot with labeled bounding boxes.
+        self, nodes: list[TreeElementNode], scale: float = 0.4, save_to_file: bool = True
+    ) -> tuple[bytes, Optional[str]]:
+        """Create annotated screenshot - FAST & OPTIMIZED.
 
         Args:
-            nodes: List of interactive elements to annotate
-            scale: Scale factor for the screenshot
+            nodes: Interactive elements to annotate
+            scale: Scale factor (default 0.4 for speed)
+            save_to_file: Save to temp file instead of returning bytes
 
         Returns:
-            PNG image bytes with annotations
+            (image_bytes, file_path) - bytes empty if saved to file
         """
         screenshot = self.desktop.get_screenshot(scale=scale)
 
@@ -342,15 +344,15 @@ class Tree:
             font = ImageFont.load_default()
 
         def get_random_color() -> str:
-            """Generate a random color for annotations."""
+            """Generate random color."""
             return "#{:06x}".format(random.randint(0, 0xFFFFFF))
 
         def draw_annotation(label: int, node: TreeElementNode):
-            """Draw annotation for a single element."""
+            """Draw annotation for element."""
             box = node.bounding_box
             color = get_random_color()
 
-            # Scale and pad the bounding box
+            # Scale and pad
             adjusted_box = (
                 int(box.left * scale) + ANNOTATION_PADDING,
                 int(box.top * scale) + ANNOTATION_PADDING,
@@ -358,10 +360,8 @@ class Tree:
                 int(box.bottom * scale) + ANNOTATION_PADDING
             )
 
-            # Draw bounding box
             draw.rectangle(adjusted_box, outline=color, width=2)
 
-            # Label dimensions
             label_text = str(label)
             bbox = draw.textbbox((0, 0), label_text, font=font)
             label_width = bbox[2] - bbox[0]
@@ -369,13 +369,11 @@ class Tree:
 
             left, top, right, bottom = adjusted_box
 
-            # Label position above bounding box
             label_x1 = right - label_width - 4
             label_y1 = top - label_height - 6
             label_x2 = label_x1 + label_width + 4
             label_y2 = label_y1 + label_height + 6
 
-            # Draw label background and text
             draw.rectangle([(label_x1, label_y1), (label_x2, label_y2)], fill=color)
             draw.text((label_x1 + 2, label_y1 + 2), label_text, fill=(255, 255, 255), font=font)
 
@@ -386,7 +384,19 @@ class Tree:
             except:
                 pass
 
-        # Convert to bytes
-        buffer = BytesIO()
-        padded_screenshot.save(buffer, format='PNG')
-        return buffer.getvalue()
+        # OPTIMIZED: Save to temp file (much faster!)
+        if save_to_file:
+            import tempfile
+            import os
+            temp_dir = tempfile.gettempdir()
+            timestamp = int(time.time() * 1000)
+            file_path = os.path.join(temp_dir, f"windows_mcp_screenshot_{timestamp}.jpg")
+            # Use JPEG with quality 85 (5-10x smaller than PNG!)
+            padded_screenshot.save(file_path, format='JPEG', quality=85, optimize=True)
+            logger.info(f"Screenshot saved to: {file_path}")
+            return b'', file_path
+        else:
+            # Fallback: return bytes (slower)
+            buffer = BytesIO()
+            padded_screenshot.save(buffer, format='JPEG', quality=85, optimize=True)
+            return buffer.getvalue(), None

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "windows-mcp-server"
-version = "0.3.0"
-description = "Enterprise-grade MCP server for Windows PC automation with intelligent UI detection, comprehensive error handling, and logging"
+version = "0.4.0"
+description = "Ultra-fast MCP server for Windows PC automation - 10x faster with file-based images, JPEG compression, and intelligent UI detection"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
