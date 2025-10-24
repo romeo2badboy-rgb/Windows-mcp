@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 import time
+import logging
+import contextlib
 from typing import Any, Optional
 
 import mss
@@ -41,6 +43,26 @@ except ImportError:
     DESKTOP_SERVICE_AVAILABLE = False
     print("Warning: Desktop service not available. State tool will be limited.")
 
+try:
+    from windows_mcp.utils import (
+        retry_on_failure,
+        validate_coordinates,
+        validate_label,
+        validate_string,
+        validate_number,
+        create_error_response,
+        create_success_response,
+        PerformanceTimer,
+        sanitize_file_path
+    )
+    UTILS_AVAILABLE = True
+except ImportError:
+    UTILS_AVAILABLE = False
+    print("Warning: Utils not available. Error handling will be basic.")
+    # Provide fallback functions
+    def create_error_response(msg, tool=""): return [TextContent(type="text", text=f"Error: {msg}")]
+    def create_success_response(msg, extra=None): return [TextContent(type="text", text=msg)]
+
 from mcp.server import Server
 from mcp.types import (
     Tool,
@@ -48,6 +70,16 @@ from mcp.types import (
     ImageContent,
     EmbeddedResource,
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stderr)
+    ]
+)
+logger = logging.getLogger('windows-mcp.server')
 
 # Configure PyAutoGUI safety
 pyautogui.FAILSAFE = True
@@ -59,6 +91,14 @@ app = Server("windows-mcp-server")
 # Initialize desktop service and cached state
 desktop_service = Desktop() if DESKTOP_SERVICE_AVAILABLE else None
 cached_tree_state = None
+cached_tree_timestamp = 0
+
+logger.info("=" * 60)
+logger.info("Windows MCP Server v0.2.0 Starting...")
+logger.info(f"Windows API available: {WINDOWS_AVAILABLE}")
+logger.info(f"Desktop Service available: {DESKTOP_SERVICE_AVAILABLE}")
+logger.info(f"Utils available: {UTILS_AVAILABLE}")
+logger.info("=" * 60)
 
 
 # ============================================================================
@@ -592,194 +632,307 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent | ImageConten
 # DESKTOP STATE TOOL IMPLEMENTATIONS
 # ============================================================================
 
+@retry_on_failure(max_retries=2, delay=0.5) if UTILS_AVAILABLE else (lambda f: f)
 async def tool_get_desktop_state(args: dict) -> list[TextContent | ImageContent]:
     """Get comprehensive desktop state with UI element detection."""
-    global cached_tree_state
+    global cached_tree_state, cached_tree_timestamp
+
+    logger.info("Getting desktop state...")
 
     if not DESKTOP_SERVICE_AVAILABLE or desktop_service is None:
-        return [TextContent(
-            type="text",
-            text="Error: Desktop service not available. Install uiautomation library."
-        )]
+        return create_error_response(
+            "Desktop service not available. Install uiautomation library.",
+            "get_desktop_state"
+        )
 
     try:
-        use_vision = args.get("use_vision", False)
-        include_informative = args.get("include_informative", True)
-        include_scrollable = args.get("include_scrollable", True)
+        with PerformanceTimer("get_desktop_state") if UTILS_AVAILABLE else contextlib.nullcontext():
+            # Validate arguments
+            use_vision = args.get("use_vision", False)
+            include_informative = args.get("include_informative", True)
+            include_scrollable = args.get("include_scrollable", True)
 
-        # Get the tree service
-        tree = Tree(desktop_service)
+            if not isinstance(use_vision, bool):
+                return create_error_response("use_vision must be a boolean", "get_desktop_state")
+            if not isinstance(include_informative, bool):
+                return create_error_response("include_informative must be a boolean", "get_desktop_state")
+            if not isinstance(include_scrollable, bool):
+                return create_error_response("include_scrollable must be a boolean", "get_desktop_state")
 
-        # Get the UI tree state
-        tree_state = tree.get_state()
-        cached_tree_state = tree_state  # Cache for click_element/type_into_element
+            # Get the tree service
+            tree = Tree(desktop_service)
 
-        # Get system information
-        windows_version = desktop_service.get_windows_version()
-        default_language = desktop_service.get_default_language()
+            # Get the UI tree state with caching
+            tree_state = tree.get_state(force_refresh=False)
 
-        # Build the response
-        result = []
+            # Update cache
+            cached_tree_state = tree_state
+            cached_tree_timestamp = time.time()
 
-        # Add system info
-        system_info = f"""=== DESKTOP STATE ===
+            logger.info(f"Found {len(tree_state.interactive_nodes)} interactive elements")
+
+            # Get system information with error handling
+            try:
+                windows_version = desktop_service.get_windows_version()
+            except Exception as e:
+                logger.warning(f"Could not get Windows version: {e}")
+                windows_version = "Unknown"
+
+            try:
+                default_language = desktop_service.get_default_language()
+            except Exception as e:
+                logger.warning(f"Could not get default language: {e}")
+                default_language = "Unknown"
+
+            # Build the response
+            result = []
+
+            # Add system info
+            system_info = f"""=== DESKTOP STATE ===
 
 Windows Version: {windows_version}
 Default Language: {default_language}
-Encoding: {desktop_service.encoding}
+Encoding: {getattr(desktop_service, 'encoding', 'utf-8')}
+Scan Time: {time.strftime('%Y-%m-%d %H:%M:%S')}
 
 """
 
-        # Add interactive elements (most important!)
-        interactive_text = tree_state.interactive_elements_to_string()
-        system_info += f"=== INTERACTIVE ELEMENTS ===\n"
-        system_info += "(Use these labels with click_element and type_into_element tools)\n\n"
-        system_info += interactive_text + "\n\n"
+            # Add interactive elements (most important!)
+            interactive_text = tree_state.interactive_elements_to_string()
+            system_info += f"=== INTERACTIVE ELEMENTS ===\n"
+            system_info += "(Use these labels with click_element and type_into_element tools)\n\n"
+            system_info += interactive_text + "\n\n"
 
-        # Add informative elements if requested
-        if include_informative:
-            informative_text = tree_state.informative_elements_to_string()
-            system_info += f"=== INFORMATIVE ELEMENTS ===\n"
-            system_info += informative_text + "\n\n"
+            # Add informative elements if requested
+            if include_informative:
+                informative_text = tree_state.informative_elements_to_string()
+                system_info += f"=== INFORMATIVE ELEMENTS ===\n"
+                system_info += informative_text + "\n\n"
 
-        # Add scrollable elements if requested
-        if include_scrollable:
-            scrollable_text = tree_state.scrollable_elements_to_string()
-            system_info += f"=== SCROLLABLE ELEMENTS ===\n"
-            system_info += scrollable_text + "\n\n"
+            # Add scrollable elements if requested
+            if include_scrollable:
+                scrollable_text = tree_state.scrollable_elements_to_string()
+                system_info += f"=== SCROLLABLE ELEMENTS ===\n"
+                system_info += scrollable_text + "\n\n"
 
-        # Add statistics
-        system_info += f"=== SUMMARY ===\n"
-        system_info += f"Interactive Elements: {len(tree_state.interactive_nodes)}\n"
-        system_info += f"Informative Elements: {len(tree_state.informative_nodes)}\n"
-        system_info += f"Scrollable Elements: {len(tree_state.scrollable_nodes)}\n"
+            # Add statistics
+            system_info += f"=== SUMMARY ===\n"
+            system_info += f"Interactive Elements: {len(tree_state.interactive_nodes)}\n"
+            system_info += f"Informative Elements: {len(tree_state.informative_nodes)}\n"
+            system_info += f"Scrollable Elements: {len(tree_state.scrollable_nodes)}\n"
+            system_info += f"\nTip: Use click_element(label=N) or type_into_element(label=N) to interact with elements.\n"
 
-        result.append(TextContent(type="text", text=system_info))
+            result.append(TextContent(type="text", text=system_info))
 
-        # Add annotated screenshot if requested
-        if use_vision and tree_state.interactive_nodes:
-            try:
-                screenshot_bytes = tree.create_annotated_screenshot(
-                    tree_state.interactive_nodes,
-                    scale=0.7
-                )
-                screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
-                result.append(ImageContent(
-                    type="image",
-                    data=screenshot_b64,
-                    mimeType="image/png"
-                ))
-                result.append(TextContent(
-                    type="text",
-                    text="Annotated screenshot showing labeled interactive elements."
-                ))
-            except Exception as e:
-                result.append(TextContent(
-                    type="text",
-                    text=f"Warning: Could not generate annotated screenshot: {str(e)}"
-                ))
+            # Add annotated screenshot if requested
+            if use_vision and tree_state.interactive_nodes:
+                try:
+                    logger.info("Generating annotated screenshot...")
+                    screenshot_bytes = tree.create_annotated_screenshot(
+                        tree_state.interactive_nodes,
+                        scale=0.7
+                    )
+                    screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
+                    result.append(ImageContent(
+                        type="image",
+                        data=screenshot_b64,
+                        mimeType="image/png"
+                    ))
+                    result.append(TextContent(
+                        type="text",
+                        text="📸 Annotated screenshot: Each interactive element is marked with its label number in a colored box."
+                    ))
+                    logger.info("Annotated screenshot generated successfully")
+                except Exception as e:
+                    logger.error(f"Failed to generate screenshot: {e}", exc_info=True)
+                    result.append(TextContent(
+                        type="text",
+                        text=f"⚠️ Warning: Could not generate annotated screenshot: {str(e)}"
+                    ))
 
-        return result
+            logger.info("Desktop state retrieved successfully")
+            return result
 
     except Exception as e:
-        return [TextContent(
-            type="text",
-            text=f"Error getting desktop state: {str(e)}"
-        )]
+        logger.error(f"Error in get_desktop_state: {e}", exc_info=True)
+        return create_error_response(f"Failed to get desktop state: {str(e)}", "get_desktop_state")
 
 
+@retry_on_failure(max_retries=2, delay=0.3) if UTILS_AVAILABLE else (lambda f: f)
 async def tool_click_element(args: dict) -> list[TextContent]:
     """Click on a UI element by its label."""
-    global cached_tree_state
+    global cached_tree_state, cached_tree_timestamp
 
+    logger.info(f"Clicking element with args: {args}")
+
+    # Check if cache exists and is recent
     if cached_tree_state is None:
-        return [TextContent(
-            type="text",
-            text="Error: No cached desktop state. Please run get_desktop_state first."
-        )]
+        return create_error_response(
+            "No cached desktop state. Please run get_desktop_state first.",
+            "click_element"
+        )
+
+    # Check if cache is stale (older than 30 seconds)
+    if UTILS_AVAILABLE and (time.time() - cached_tree_timestamp) > 30:
+        logger.warning("Cached tree state is stale (>30s old). Consider refreshing with get_desktop_state.")
 
     try:
+        # Validate label
+        if "label" not in args:
+            return create_error_response("Missing required parameter: label", "click_element")
+
         label = args["label"]
+
+        if UTILS_AVAILABLE:
+            is_valid, error_msg = validate_label(label, len(cached_tree_state.interactive_nodes))
+            if not is_valid:
+                return create_error_response(error_msg, "click_element")
+        else:
+            if not isinstance(label, int) or label < 0 or label >= len(cached_tree_state.interactive_nodes):
+                return create_error_response(
+                    f"Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}",
+                    "click_element"
+                )
+
         button = args.get("button", "left")
         clicks = args.get("clicks", 1)
 
-        # Find the element by label
-        if label < 0 or label >= len(cached_tree_state.interactive_nodes):
-            return [TextContent(
-                type="text",
-                text=f"Error: Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}"
-            )]
+        # Validate button
+        if button not in ["left", "right", "middle"]:
+            return create_error_response(f"Invalid button: {button}. Must be 'left', 'right', or 'middle'", "click_element")
+
+        # Validate clicks
+        if not isinstance(clicks, int) or clicks < 1 or clicks > 3:
+            return create_error_response("clicks must be 1, 2, or 3", "click_element")
 
         element = cached_tree_state.interactive_nodes[label]
 
-        # Click at the element's center
+        # Get click coordinates
         x, y = element.center.x, element.center.y
+
+        # Validate coordinates are on screen
+        if UTILS_AVAILABLE:
+            screen_size = pyautogui.size()
+            is_valid, error_msg = validate_coordinates(x, y, screen_size.width, screen_size.height)
+            if not is_valid:
+                return create_error_response(f"Element coordinates invalid: {error_msg}", "click_element")
+
+        # Perform click
+        logger.info(f"Clicking element {label} at ({x},{y}) with {button} button, {clicks} clicks")
         pyautogui.click(x=x, y=y, button=button, clicks=clicks, duration=0.2)
 
-        click_type = "Double-clicked" if clicks == 2 else "Clicked"
-        return [TextContent(
-            type="text",
-            text=f"{click_type} {button} button on element {label}: '{element.name}' "
-                 f"({element.control_type}) at ({x},{y}) in app '{element.app_name}'"
-        )]
+        click_type = "Triple-clicked" if clicks == 3 else ("Double-clicked" if clicks == 2 else "Clicked")
+        success_msg = (
+            f"✓ {click_type} {button} button on element {label}: '{element.name}' "
+            f"({element.control_type}) at ({x},{y}) in '{element.app_name}'"
+        )
+
+        logger.info(f"Click successful: {success_msg}")
+        return create_success_response(success_msg)
+
+    except KeyError as e:
+        return create_error_response(f"Missing required parameter: {str(e)}", "click_element")
     except Exception as e:
-        return [TextContent(type="text", text=f"Error clicking element: {str(e)}")]
+        logger.error(f"Error in click_element: {e}", exc_info=True)
+        return create_error_response(f"Failed to click element: {str(e)}", "click_element")
 
 
+@retry_on_failure(max_retries=2, delay=0.3) if UTILS_AVAILABLE else (lambda f: f)
 async def tool_type_into_element(args: dict) -> list[TextContent]:
     """Type text into a UI element."""
-    global cached_tree_state
+    global cached_tree_state, cached_tree_timestamp
 
+    logger.info(f"Typing into element with args: {args}")
+
+    # Check if cache exists
     if cached_tree_state is None:
-        return [TextContent(
-            type="text",
-            text="Error: No cached desktop state. Please run get_desktop_state first."
-        )]
+        return create_error_response(
+            "No cached desktop state. Please run get_desktop_state first.",
+            "type_into_element"
+        )
+
+    # Warn if cache is stale
+    if UTILS_AVAILABLE and (time.time() - cached_tree_timestamp) > 30:
+        logger.warning("Cached tree state is stale (>30s old). Consider refreshing with get_desktop_state.")
 
     try:
+        # Validate required parameters
+        if "label" not in args:
+            return create_error_response("Missing required parameter: label", "type_into_element")
+        if "text" not in args:
+            return create_error_response("Missing required parameter: text", "type_into_element")
+
         label = args["label"]
         text = args["text"]
         clear_first = args.get("clear_first", False)
         press_enter = args.get("press_enter", False)
 
-        # Find the element by label
-        if label < 0 or label >= len(cached_tree_state.interactive_nodes):
-            return [TextContent(
-                type="text",
-                text=f"Error: Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}"
-            )]
+        # Validate label
+        if UTILS_AVAILABLE:
+            is_valid, error_msg = validate_label(label, len(cached_tree_state.interactive_nodes))
+            if not is_valid:
+                return create_error_response(error_msg, "type_into_element")
+
+            # Validate text
+            is_valid, error_msg = validate_string(text, "text", min_length=0, max_length=10000)
+            if not is_valid:
+                return create_error_response(error_msg, "type_into_element")
+        else:
+            if not isinstance(label, int) or label < 0 or label >= len(cached_tree_state.interactive_nodes):
+                return create_error_response(
+                    f"Invalid label {label}. Valid range: 0-{len(cached_tree_state.interactive_nodes)-1}",
+                    "type_into_element"
+                )
+            if not isinstance(text, str):
+                return create_error_response("text must be a string", "type_into_element")
+
+        # Validate boolean parameters
+        if not isinstance(clear_first, bool):
+            return create_error_response("clear_first must be a boolean", "type_into_element")
+        if not isinstance(press_enter, bool):
+            return create_error_response("press_enter must be a boolean", "type_into_element")
 
         element = cached_tree_state.interactive_nodes[label]
 
         # Click the element first to focus it
         x, y = element.center.x, element.center.y
+        logger.info(f"Clicking element {label} at ({x},{y}) to focus")
         pyautogui.click(x=x, y=y, duration=0.2)
-        time.sleep(0.1)
+        time.sleep(0.15)  # Give time for focus
 
         # Clear existing text if requested
         if clear_first:
+            logger.info("Clearing existing text")
             pyautogui.hotkey('ctrl', 'a')
             time.sleep(0.05)
             pyautogui.press('delete')
             time.sleep(0.05)
 
         # Type the text
+        logger.info(f"Typing text: {text[:50]}{'...' if len(text) > 50 else ''}")
         pyautogui.write(text, interval=0.01)
 
         # Press enter if requested
         if press_enter:
             time.sleep(0.1)
             pyautogui.press('enter')
+            logger.info("Pressed Enter")
 
-        action = "Typed (cleared first)" if clear_first else "Typed"
+        action = "✓ Typed (cleared first)" if clear_first else "✓ Typed"
         enter_msg = " and pressed Enter" if press_enter else ""
-        return [TextContent(
-            type="text",
-            text=f"{action} '{text}' into element {label}: '{element.name}' "
-                 f"({element.control_type}) in app '{element.app_name}'{enter_msg}"
-        )]
+        success_msg = (
+            f"{action} text into element {label}: '{element.name}' "
+            f"({element.control_type}) in '{element.app_name}'{enter_msg}"
+        )
+
+        logger.info(f"Type successful: {success_msg}")
+        return create_success_response(success_msg)
+
+    except KeyError as e:
+        return create_error_response(f"Missing required parameter: {str(e)}", "type_into_element")
     except Exception as e:
-        return [TextContent(type="text", text=f"Error typing into element: {str(e)}")]
+        logger.error(f"Error in type_into_element: {e}", exc_info=True)
+        return create_error_response(f"Failed to type into element: {str(e)}", "type_into_element")
 
 
 # ============================================================================
